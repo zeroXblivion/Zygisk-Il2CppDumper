@@ -461,6 +461,96 @@ static int save_library_callback(struct dl_phdr_info *info, size_t size, void *d
     return 0;
 }
 
+// Helper function to copy a single file
+static bool copy_general_file(const char* src_path, const char* dst_path) {
+    std::ifstream src(src_path, std::ios::binary);
+    if (!src.is_open()) {
+        LOGE("copy_general_file: Failed to open source file '%s': %s", src_path, strerror(errno));
+        return false;
+    }
+
+    std::ofstream dst(dst_path, std::ios::binary);
+    if (!dst.is_open()) {
+        LOGE("copy_general_file: Failed to open destination file '%s': %s", dst_path, strerror(errno));
+        src.close();
+        return false;
+    }
+
+    LOGI("copy_general_file: Attempting to copy '%s' to '%s'", src_path, dst_path);
+
+    char buffer[4096];
+    while (src.read(buffer, sizeof(buffer)) || src.gcount() > 0) {
+        dst.write(buffer, src.gcount());
+        if (dst.fail()) {
+            break;
+        }
+    }
+
+    bool copy_failed = src.fail() && !src.eof() || dst.fail();
+
+    src.close();
+    dst.close();
+
+    if (copy_failed) {
+        LOGE("copy_general_file: Error during copy of '%s' to '%s'. Attempting to remove partial file. Error: %s",
+             src_path, dst_path, strerror(errno));
+        if (remove(dst_path) != 0) {
+            LOGE("copy_general_file: Failed to remove partially written file '%s': %s", dst_path, strerror(errno));
+        }
+        return false;
+    } else {
+        struct stat st_final_dest;
+        if (stat(dst_path, &st_final_dest) == 0) {
+            LOGI("copy_general_file: Successfully copied '%s' to '%s' (%ld bytes written)", src_path, dst_path, (long)st_final_dest.st_size);
+        } else {
+            LOGI("copy_general_file: Successfully copied '%s' to '%s' (stat after copy failed for destination)", src_path, dst_path);
+        }
+        return true;
+    }
+}
+
+// Function to find and save global-metadata.dat
+static void save_global_metadata(const char* app_data_root_dir, const char* target_output_dir) {
+    LOGI("Attempting to find and save global-metadata.dat...");
+    LOGI("Using app data root: %s", app_data_root_dir);
+    LOGI("Target output directory: %s", target_output_dir);
+
+    const char* metadata_filename = "global-metadata.dat";
+    std::vector<std::string> relative_search_paths;
+
+    relative_search_paths.push_back("il2cpp/Metadata/" + std::string(metadata_filename));
+    relative_search_paths.push_back("files/il2cpp/Metadata/" + std::string(metadata_filename));
+    relative_search_paths.push_back("il2cpp_data/Metadata/" + std::string(metadata_filename));
+    relative_search_paths.push_back("files/il2cpp_data/Metadata/" + std::string(metadata_filename));
+    relative_search_paths.push_back("files/" + std::string(metadata_filename));
+    relative_search_paths.push_back(std::string(metadata_filename));
+
+
+    bool found_and_copied = false;
+    for (const auto& rel_path : relative_search_paths) {
+        std::string full_src_path = std::string(app_data_root_dir) + "/" + rel_path;
+        LOGI("Checking for metadata at: %s", full_src_path.c_str());
+
+        struct stat st_src;
+        if (stat(full_src_path.c_str(), &st_src) == 0 && S_ISREG(st_src.st_mode)) {
+            LOGI("Found potential global-metadata.dat at: %s (%ld bytes)", full_src_path.c_str(), (long)st_src.st_size);
+            std::string dest_file_path = std::string(target_output_dir) + "/" + metadata_filename;
+            
+            if (copy_general_file(full_src_path.c_str(), dest_file_path.c_str())) {
+                LOGI("Successfully saved global-metadata.dat from %s to %s", full_src_path.c_str(), dest_file_path.c_str());
+                found_and_copied = true;
+                break;
+            } else {
+                LOGE("Failed to copy global-metadata.dat from %s. Will try other paths.", full_src_path.c_str());
+            }
+        }
+    }
+
+    if (!found_and_copied) {
+        LOGW("global-metadata.dat was not found in any of the common searched locations or could not be copied.");
+    }
+}
+
 void il2cpp_dump(const char *outDir) {
     LOGI("dumping...");
     size_t size;
@@ -558,7 +648,7 @@ void il2cpp_dump(const char *outDir) {
     std::string current_package_name_str;
     
     const char* data_data_prefix = "/data/data/";
-    const char* data_user_prefix = "/data/user/0/"; // Path for Android N+ (API 24+) multi-user environments
+    const char* data_user_prefix = "/data/user/0/";
 
     if (strncmp(outDir, data_user_prefix, strlen(data_user_prefix)) == 0) {
         current_package_name_str = std::string(outDir + strlen(data_user_prefix));
@@ -588,15 +678,16 @@ void il2cpp_dump(const char *outDir) {
              if (!S_ISDIR(st_dir_check.st_mode)) {
                 LOGE("Path %s exists but is not a directory. Libraries cannot be saved.", files_output_dir.c_str());
                 LOGI("Finished attempting to save native libraries (aborted due to invalid output path).");
+                save_global_metadata(outDir, files_output_dir.c_str());
                 LOGI("dump done!");
-                return; 
+                return;
              }
             LOGI("Output directory %s already exists.", files_output_dir.c_str());
         }
         
         IterateData iter_data;
         iter_data.output_dir_files = files_output_dir.c_str();
-        iter_data.app_package_name = current_package_name_str.c_str(); 
+        iter_data.app_package_name = current_package_name_str.c_str();
         
         int iteration_result = xdl_iterate_phdr(save_library_callback, &iter_data, XDL_FULL_PATHNAME);
         if (iteration_result != 0) {
@@ -604,5 +695,7 @@ void il2cpp_dump(const char *outDir) {
         }
     }
     LOGI("Finished attempting to save native libraries.");
+    save_global_metadata(outDir, files_output_dir.c_str());
+
     LOGI("dump done!");
 }
