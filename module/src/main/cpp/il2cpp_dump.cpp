@@ -131,7 +131,7 @@ std::string dump_method(Il2CppClass *klass) {
                              method->methodPointer, short_module_name, module_base_for_method);
                     }
                 }
-                outPut << " (module: " << short_module_name << ") VA: 0x" << std::hex << method_va;
+                outPut << " (Module: " << short_module_name << ") VA: 0x" << std::hex << method_va;
             } else {
                 LOGW("xdl_addr failed for method VA %p. Using global il2cpp_base (for module %s) as fallback.",
                      method->methodPointer, il2cpp_module_name_global.c_str());
