@@ -26,7 +26,6 @@
 
 #undef DO_API
 
-static uint64_t il2cpp_base = 0; 
 static std::string il2cpp_module_name_global = "libil2cpp.so"; 
 static void *g_xdl_addr_cache = nullptr;
 
@@ -104,23 +103,64 @@ std::string dump_method(Il2CppClass *klass) {
     outPut << "\n\t// Methods\n";
     void *iter = nullptr;
     while (auto method = il2cpp_class_get_methods(klass, &iter)) {
-        //TODO attribute
+        uint64_t method_va = reinterpret_cast<uint64_t>(method->methodPointer);
+
         if (method->methodPointer) {
-            outPut << "\t// RVA: 0x";
-            outPut << std::hex << (uint64_t) method->methodPointer - il2cpp_base;
-            outPut << " VA: 0x";
-            outPut << std::hex << (uint64_t) method->methodPointer;
+            xdl_info_t method_dlinfo;
+            if (xdl_addr(method->methodPointer, &method_dlinfo, &g_xdl_addr_cache) != 0) {
+                const char* full_module_path = method_dlinfo.dli_fname;
+                uint64_t module_base_for_method = reinterpret_cast<uint64_t>(method_dlinfo.dli_fbase);
+                
+                const char* short_module_name = "unknown_module.so";
+                if (full_module_path) {
+                    const char* found_slash = strrchr(full_module_path, '/');
+                    if (found_slash) {
+                        short_module_name = found_slash + 1;
+                    } else {
+                        short_module_name = full_module_path;
+                    }
+                }
+
+                outPut << "\t// RVA: 0x";
+                if (module_base_for_method != 0 && method_va >= module_base_for_method) {
+                    outPut << std::hex << (method_va - module_base_for_method);
+                } else {
+                    outPut << std::hex << method_va; 
+                    if (module_base_for_method != 0) {
+                        LOGW("Method VA %p in %s is less than its module_base 0x%" PRIx64 ". RVA shown as VA.",
+                             method->methodPointer, short_module_name, module_base_for_method);
+                    }
+                }
+                outPut << " (module: " << short_module_name << ") VA: 0x" << std::hex << method_va;
+            } else {
+                LOGW("xdl_addr failed for method VA %p. Using global il2cpp_base (for module %s) as fallback.",
+                     method->methodPointer, il2cpp_module_name_global.c_str());
+                outPut << "\t// RVA: 0x";
+                if (il2cpp_base != 0 && method_va >= il2cpp_base) {
+                     outPut << std::hex << (method_va - il2cpp_base);
+                } else {
+                    outPut << std::hex << method_va;
+                     if (il2cpp_base != 0) {
+                         LOGW("Method VA %p (xdl_addr_failed) is less than global il2cpp_base 0x%" PRIx64 ". RVA shown as VA.",
+                              method->methodPointer, il2cpp_base);
+                     }
+                }
+                outPut << " (module: " << il2cpp_module_name_global << " [fallback]) VA: 0x" << std::hex << method_va;
+            }
         } else {
-            outPut << "\t// RVA: 0x VA: 0x0";
+            outPut << "\t// RVA: 0x (module: n/a) VA: 0x0";
         }
-        /*if (method->slot != 65535) {
-            outPut << " Slot: " << std::dec << method->slot;
-        }*/
-        outPut << "\n\t";
+        
+        // Slot info (optional)
+        // if (method->slot != 65535) {
+        //    outPut << " Slot: " << std::dec << method->slot;
+        // }
+        outPut << "\n\t"; // Newline and tab for the method signature itself
+
+        // Original signature dumping logic follows
         uint32_t iflags = 0;
         auto flags = il2cpp_method_get_flags(method, &iflags);
         outPut << get_method_modifier(flags);
-        //TODO genericContainerIndex
         auto return_type = il2cpp_method_get_return_type(method);
         if (_il2cpp_type_is_byref(return_type)) {
             outPut << "ref ";
@@ -151,13 +191,11 @@ std::string dump_method(Il2CppClass *klass) {
             auto parameter_class = il2cpp_class_from_type(param);
             outPut << il2cpp_class_get_name(parameter_class) << " "
                    << il2cpp_method_get_param_name(method, i);
-            outPut << ", ";
-        }
-        if (param_count > 0) {
-            outPut.seekp(-2, outPut.cur);
+            if (i < param_count - 1) {
+                 outPut << ", ";
+            }
         }
         outPut << ") { }\n";
-        //TODO GenericInstMethod
     }
     return outPut.str();
 }
@@ -582,27 +620,29 @@ static void save_global_metadata(const char* app_data_root_dir, const char* targ
 }
 
 void il2cpp_dump(const char *outDir) {
+    g_xdl_addr_cache = nullptr; 
+
     LOGI("dumping...");
-    size_t size;
+    size_t assembly_size;
     auto domain = il2cpp_domain_get();
-    auto assemblies = il2cpp_domain_get_assemblies(domain, &size);
+    auto assemblies = il2cpp_domain_get_assemblies(domain, &assembly_size);
     std::stringstream imageOutput;
-    for (int i = 0; i < size; ++i) {
+    for (size_t i = 0; i < assembly_size; ++i) { 
         auto image = il2cpp_assembly_get_image(assemblies[i]);
         imageOutput << "// Image " << i << ": " << il2cpp_image_get_name(image) << "\n";
     }
     std::vector<std::string> outPuts;
     if (il2cpp_image_get_class) {
         LOGI("Version greater than 2018.3");
-        for (int i = 0; i < size; ++i) {
+        for (size_t i = 0; i < assembly_size; ++i) { 
             auto image = il2cpp_assembly_get_image(assemblies[i]);
             std::stringstream imageStr;
             imageStr << "\n// Dll : " << il2cpp_image_get_name(image);
             auto classCount = il2cpp_image_get_class_count(image);
-            for (int j = 0; j < classCount; ++j) {
+            for (size_t j = 0; j < classCount; ++j) { 
                 auto klass = il2cpp_image_get_class(image, j);
                 auto type = il2cpp_class_get_type(const_cast<Il2CppClass *>(klass));
-                auto outPut = imageStr.str() + dump_type(type);
+                auto outPut = imageStr.str() + dump_type(type); // dump_type calls dump_method
                 outPuts.push_back(outPut);
             }
         }
@@ -612,19 +652,17 @@ void il2cpp_dump(const char *outDir) {
         auto assemblyClass = il2cpp_class_from_name(corlib, "System.Reflection", "Assembly");
         auto assemblyLoad = il2cpp_class_get_method_from_name(assemblyClass, "Load", 1);
         auto assemblyGetTypes = il2cpp_class_get_method_from_name(assemblyClass, "GetTypes", 0);
-        if (assemblyLoad && assemblyLoad->methodPointer) {
-        } else {
+        if (!assemblyLoad || !assemblyLoad->methodPointer) {
             LOGE("miss Assembly::Load");
         }
-        if (assemblyGetTypes && assemblyGetTypes->methodPointer) {
-        } else {
+        if (!assemblyGetTypes || !assemblyGetTypes->methodPointer) {
             LOGE("miss Assembly::GetTypes");
         }
 
         if (assemblyLoad && assemblyLoad->methodPointer && assemblyGetTypes && assemblyGetTypes->methodPointer) {
             typedef void *(*Assembly_Load_ftn)(void *, Il2CppString *, void *);
             typedef Il2CppArray *(*Assembly_GetTypes_ftn)(void *, void *);
-            for (int i = 0; i < size; ++i) {
+            for (size_t i = 0; i < assembly_size; ++i) {
                 auto image = il2cpp_assembly_get_image(assemblies[i]);
                 std::stringstream imageStr;
                 auto image_name = il2cpp_image_get_name(image);
@@ -641,11 +679,15 @@ void il2cpp_dump(const char *outDir) {
                         reflectionAssembly, nullptr);
                     if (reflectionTypes) {
                         auto items = reflectionTypes->vector;
-                        for (int j = 0; j < reflectionTypes->max_length; ++j) {
+                        for (size_t j = 0; j < reflectionTypes->max_length; ++j) { 
                             auto klass = il2cpp_class_from_system_type((Il2CppReflectionType *) items[j]);
-                            auto type = il2cpp_class_get_type(klass);
-                            auto outPut = imageStr.str() + dump_type(type);
-                            outPuts.push_back(outPut);
+                            if (klass) { // Add null check for klass
+                                auto type = il2cpp_class_get_type(klass);
+                                auto outPut = imageStr.str() + dump_type(type); 
+                                outPuts.push_back(outPut);
+                            } else {
+                                LOGW("il2cpp_class_from_system_type returned null for item %zu in image %s", j, image_name);
+                            }
                         }
                     } else {
                         LOGW("Assembly::GetTypes returned null for image: %s", image_name);
@@ -658,6 +700,7 @@ void il2cpp_dump(const char *outDir) {
             LOGE("Cannot use reflection for type dumping due to missing Assembly methods. Dump.cs may be incomplete.");
         }
     }
+
     LOGI("write dump file");
     auto outPath = std::string(outDir).append("/files/dump.cs");
     std::ofstream outStream(outPath);
@@ -666,66 +709,79 @@ void il2cpp_dump(const char *outDir) {
     } else {
         outStream << imageOutput.str();
         auto count = outPuts.size();
-        for (int i = 0; i < count; ++i) {
+        for (size_t i = 0; i < count; ++i) { // Use size_t
             outStream << outPuts[i];
         }
         outStream.close();
-        LOGI("dump.cs written successfully to %s", outPath.c_str());
+        if (outStream.fail()) {
+             LOGE("Failed during writing or closing dump.cs at %s", outPath.c_str());
+        } else {
+            LOGI("dump.cs written successfully to %s", outPath.c_str());
+        }
     }
 
+    // --- Save Libraries ---
     LOGI("Attempting to save used native libraries...");
     std::string files_output_dir = std::string(outDir) + "/files";
     std::string current_package_name_str;
-    
     const char* data_data_prefix = "/data/data/";
     const char* data_user_prefix = "/data/user/0/";
 
     if (strncmp(outDir, data_user_prefix, strlen(data_user_prefix)) == 0) {
         current_package_name_str = std::string(outDir + strlen(data_user_prefix));
-        LOGI("Extracted package name using /data/user/0/ prefix: %s", current_package_name_str.c_str());
     } else if (strncmp(outDir, data_data_prefix, strlen(data_data_prefix)) == 0) {
         current_package_name_str = std::string(outDir + strlen(data_data_prefix));
-        LOGI("Extracted package name using /data/data/ prefix: %s", current_package_name_str.c_str());
     } else {
-        LOGW("outDir format '%s' unexpected. Cannot reliably extract package name. Library filtering based on package name might be less accurate or disabled.", outDir);
+        LOGW("outDir format '%s' unexpected. Cannot reliably extract package name.", outDir);
     }
 
     if (current_package_name_str.empty()) {
-         LOGE("Could not determine package name from outDir ('%s') for library filtering. Aborting library save or proceeding with less effective filtering.", outDir);
-    } else {
-        LOGI("Using package name for filtering: %s", current_package_name_str.c_str());
-        LOGI("Output directory for libraries: %s", files_output_dir.c_str());
-        
-        struct stat st_dir_check;
-        if (stat(files_output_dir.c_str(), &st_dir_check) == -1) {
-            LOGI("Output directory %s does not exist. Attempting to create.", files_output_dir.c_str());
-            if (mkdir(files_output_dir.c_str(), 0755) == 0) {
-                LOGI("Output directory %s created.", files_output_dir.c_str());
-            } else {
-                LOGE("Failed to create output directory %s: %s. Libraries might not be saved.", files_output_dir.c_str(), strerror(errno));
-            }
+         LOGE("Could not determine package name from outDir ('%s'). .SO library filtering might be less effective.", outDir);
+         current_package_name_str = "unknown.package.name.fallback";
+    }
+    
+    LOGI("Using package name for filtering: %s", current_package_name_str.c_str());
+    LOGI("Output directory for libraries: %s", files_output_dir.c_str());
+    
+    struct stat st_dir_check;
+    bool dir_ok = false;
+    if (stat(files_output_dir.c_str(), &st_dir_check) == -1) {
+        if (mkdir(files_output_dir.c_str(), 0755) == 0) {
+            LOGI("Output directory %s created.", files_output_dir.c_str());
+            dir_ok = true;
         } else {
-             if (!S_ISDIR(st_dir_check.st_mode)) {
-                LOGE("Path %s exists but is not a directory. Libraries cannot be saved.", files_output_dir.c_str());
-                LOGI("Finished attempting to save native libraries (aborted due to invalid output path).");
-                save_global_metadata(outDir, files_output_dir.c_str());
-                LOGI("dump done!");
-                return;
-             }
-            LOGI("Output directory %s already exists.", files_output_dir.c_str());
+            LOGE("Failed to create output directory %s: %s.", files_output_dir.c_str(), strerror(errno));
         }
-        
+    } else if (S_ISDIR(st_dir_check.st_mode)) {
+        LOGI("Output directory %s already exists.", files_output_dir.c_str());
+        dir_ok = true;
+    } else {
+        LOGE("Path %s exists but is not a directory.", files_output_dir.c_str());
+    }
+    
+    if (dir_ok) {
         IterateData iter_data;
         iter_data.output_dir_files = files_output_dir.c_str();
         iter_data.app_package_name = current_package_name_str.c_str();
-        
         int iteration_result = xdl_iterate_phdr(save_library_callback, &iter_data, XDL_FULL_PATHNAME);
         if (iteration_result != 0) {
             LOGW("xdl_iterate_phdr finished with a non-zero status: %d", iteration_result);
         }
+    } else {
+        LOGE("Skipping native library saving due to output directory issue.");
     }
     LOGI("Finished attempting to save native libraries.");
-    save_global_metadata(outDir, files_output_dir.c_str());
+
+    // --- Save Metadata ---
+    if (dir_ok) { // Only try to save if output dir is ok
+        save_global_metadata(outDir, files_output_dir.c_str());
+    } else {
+         LOGE("Skipping global-metadata saving due to output directory issue.");
+    }
+
+    // --- Clean up Cache ---
+    LOGI("Cleaning up xdl_addr cache.");
+    xdl_addr_clean(&g_xdl_addr_cache); 
 
     LOGI("dump done!");
 }
