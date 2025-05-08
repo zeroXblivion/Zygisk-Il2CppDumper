@@ -26,6 +26,10 @@
 
 #undef DO_API
 
+static uint64_t il2cpp_base = 0; 
+static std::string il2cpp_module_name_global = "libil2cpp.so"; 
+static void *g_xdl_addr_cache = nullptr;
+
 static uint64_t il2cpp_base = 0;
 
 void init_il2cpp_api(void *handle) {
@@ -327,23 +331,49 @@ std::string dump_type(const Il2CppType *type) {
 
 void il2cpp_api_init(void *handle) {
     LOGI("il2cpp_handle: %p", handle);
-    init_il2cpp_api(handle);
-    if (il2cpp_domain_get_assemblies) {
-        Dl_info dlInfo;
-        if (dladdr((void *) il2cpp_domain_get_assemblies, &dlInfo)) {
-            il2cpp_base = reinterpret_cast<uint64_t>(dlInfo.dli_fbase);
-        }
-        LOGI("il2cpp_base: %" PRIx64"", il2cpp_base);
-    } else {
-        LOGE("Failed to initialize il2cpp api.");
+    init_il2cpp_api(handle); 
+
+    if (!il2cpp_domain_get_assemblies) {
+        LOGE("il2cpp_domain_get_assemblies is NULL after init_il2cpp_api. Cannot determine il2cpp_base. RVA values will be incorrect.");
+        il2cpp_base = 0;
+        il2cpp_module_name_global = "unknown_il2cpp_module.so";
         return;
     }
-    while (!il2cpp_is_vm_thread(nullptr)) {
-        LOGI("Waiting for il2cpp_init...");
-        sleep(1);
+
+    LOGI("Memory address of resolved 'il2cpp_domain_get_assemblies' function: %p", (void*)il2cpp_domain_get_assemblies);
+
+    xdl_info_t dlinfo;
+    if (handle && xdl_info(handle, XDL_DI_DLINFO, &dlinfo) == 0) {
+        il2cpp_base = reinterpret_cast<uint64_t>(dlinfo.dli_fbase);
+        if (dlinfo.dli_fname) {
+            const char* short_name = strrchr(dlinfo.dli_fname, '/');
+            if (short_name) {
+                il2cpp_module_name_global = short_name + 1;
+            } else {
+                il2cpp_module_name_global = dlinfo.dli_fname;
+            }
+        } else {
+            il2cpp_module_name_global = "libil2cpp.so"; 
+        }
+        LOGI("Global il2cpp_base determined using xdl_info: 0x%" PRIx64 "", il2cpp_base);
+        LOGI("Global Il2Cpp Module Name set to: %s (from path: %s)", il2cpp_module_name_global.c_str(), dlinfo.dli_fname ? dlinfo.dli_fname : "N/A");
+        
+        if (il2cpp_base == 0) {
+            LOGE("xdl_info reported a base address of 0 for the main Il2Cpp module. RVA values might be incorrect.");
+        } else if (reinterpret_cast<uint64_t>(il2cpp_domain_get_assemblies) < il2cpp_base) {
+            LOGW("Warning: 'il2cpp_domain_get_assemblies' (%p) is lower than the determined il2cpp_base (0x%" PRIx64 ") for %s. This might indicate an issue.",
+                 (void*)il2cpp_domain_get_assemblies, il2cpp_base, il2cpp_module_name_global.c_str());
+        }
+
+    } else {
+        LOGE("xdl_info failed to get dli_fbase for libil2cpp.so or handle was null. Main RVA values will be incorrect.");
+        il2cpp_base = 0; 
+        il2cpp_module_name_global = "unknown_il2cpp_module.so";
     }
-    auto domain = il2cpp_domain_get();
-    il2cpp_thread_attach(domain);
+
+    if (il2cpp_base == 0 && strcmp(il2cpp_module_name_global.c_str(), "unknown_il2cpp_module.so") != 0) {
+         LOGE("Failed to obtain a valid il2cpp_base for %s. RVA calculations may be incorrect.", il2cpp_module_name_global.c_str());
+    }
 }
 
 struct IterateData {
