@@ -16,6 +16,10 @@
 #include "log.h"
 #include "il2cpp-tabledefs.h"
 #include "il2cpp-class.h"
+#include <unistd.h>
+#include <sys/stat.h>
+#include <cstdio>
+#include <errno.h>
 
 #define DO_API(r, n, p) r (*n) p
 
@@ -343,6 +347,85 @@ void il2cpp_api_init(void *handle) {
     il2cpp_thread_attach(domain);
 }
 
+struct IterateData {
+    const char* output_dir_files;
+    const char* app_package_name;
+};
+
+static int save_library_callback(struct dl_phdr_info *info, size_t size, void *data) {
+    IterateData* iterate_data = (IterateData*)data;
+    const char* lib_path = info->dlpi_name;
+
+    if (lib_path && lib_path[0] != '\0' && strstr(lib_path, ".so")) {
+        bool should_copy = false;
+        if (strstr(lib_path, iterate_data->app_package_name) != nullptr) {
+            should_copy = true;
+        } else if (strstr(lib_path, "libil2cpp.so") || strstr(lib_path, "libcsharp.so") || strstr(lib_path, "libunity.so")) {
+            should_copy = true;
+        } else {
+            if (strncmp(lib_path, "/system/", strlen("/system/")) == 0 ||
+                strncmp(lib_path, "/apex/", strlen("/apex/")) == 0 ||
+                strncmp(lib_path, "/vendor/", strlen("/vendor/")) == 0) {
+                should_copy = false;
+            } else {
+                should_copy = true;
+            }
+        }
+        
+        if (!should_copy) {
+            return 0;
+        }
+
+        const char *lib_name = strrchr(lib_path, '/');
+        if (!lib_name) {
+            lib_name = lib_path;
+        } else {
+            lib_name++;
+        }
+
+        if (lib_name[0] == '\0') {
+            return 0;
+        }
+
+        std::string dest_path_str = std::string(iterate_data->output_dir_files) + "/" + lib_name;
+        const char* dest_path = dest_path_str.c_str();
+
+        struct stat st_lib_path;
+        if (stat(lib_path, &st_lib_path) == 0 && S_ISREG(st_lib_path.st_mode)) {
+            struct stat st_dest_path;
+            if (stat(dest_path, &st_dest_path) == 0 && S_ISREG(st_dest_path.st_mode)) {
+                if (st_lib_path.st_size == st_dest_path.st_size) {
+                    return 0;
+                }
+            }
+            
+            std::ifstream src(lib_path, std::ios::binary);
+            if (!src.is_open()) {
+                return 0;
+            }
+
+            std::ofstream dst(dest_path, std::ios::binary);
+            if (!dst.is_open()) {
+                src.close();
+                return 0;
+            }
+            
+            dst << src.rdbuf();
+            bool copy_failed = src.fail() || dst.fail();
+            
+            src.close(); 
+            dst.close();
+
+            if (copy_failed) {
+                if (remove(dest_path) != 0) {
+                }
+            }
+        }
+    } else if (lib_path && lib_path[0] == '\0') {
+    }
+    return 0;
+}
+
 void il2cpp_dump(const char *outDir) {
     LOGI("dumping...");
     size_t size;
@@ -356,7 +439,6 @@ void il2cpp_dump(const char *outDir) {
     std::vector<std::string> outPuts;
     if (il2cpp_image_get_class) {
         LOGI("Version greater than 2018.3");
-        //使用il2cpp_image_get_class
         for (int i = 0; i < size; ++i) {
             auto image = il2cpp_assembly_get_image(assemblies[i]);
             std::stringstream imageStr;
@@ -365,14 +447,12 @@ void il2cpp_dump(const char *outDir) {
             for (int j = 0; j < classCount; ++j) {
                 auto klass = il2cpp_image_get_class(image, j);
                 auto type = il2cpp_class_get_type(const_cast<Il2CppClass *>(klass));
-                //LOGD("type name : %s", il2cpp_type_get_name(type));
                 auto outPut = imageStr.str() + dump_type(type);
                 outPuts.push_back(outPut);
             }
         }
     } else {
         LOGI("Version less than 2018.3");
-        //使用反射
         auto corlib = il2cpp_get_corlib();
         auto assemblyClass = il2cpp_class_from_name(corlib, "System.Reflection", "Assembly");
         auto assemblyLoad = il2cpp_class_get_method_from_name(assemblyClass, "Load", 1);
@@ -396,7 +476,6 @@ void il2cpp_dump(const char *outDir) {
             std::stringstream imageStr;
             auto image_name = il2cpp_image_get_name(image);
             imageStr << "\n// Dll : " << image_name;
-            //LOGD("image name : %s", image->name);
             auto imageName = std::string(image_name);
             auto pos = imageName.rfind('.');
             auto imageNameNoExt = imageName.substr(0, pos);
@@ -410,7 +489,6 @@ void il2cpp_dump(const char *outDir) {
             for (int j = 0; j < reflectionTypes->max_length; ++j) {
                 auto klass = il2cpp_class_from_system_type((Il2CppReflectionType *) items[j]);
                 auto type = il2cpp_class_get_type(klass);
-                //LOGD("type name : %s", il2cpp_type_get_name(type));
                 auto outPut = imageStr.str() + dump_type(type);
                 outPuts.push_back(outPut);
             }
@@ -425,5 +503,30 @@ void il2cpp_dump(const char *outDir) {
         outStream << outPuts[i];
     }
     outStream.close();
+    LOGI("dump.cs written successfully to %s", outPath.c_str());
+
+    LOGI("Attempting to save used native libraries...");
+    std::string files_output_dir = std::string(outDir) + "/files";
+    std::string current_package_name_str;
+    const char* data_data_prefix = "/data/data/";
+    if (strncmp(outDir, data_data_prefix, strlen(data_data_prefix)) == 0) {
+        current_package_name_str = std::string(outDir + strlen(data_data_prefix));
+    } else {
+        LOGW("outDir format unexpected: %s. Library filtering might be less accurate.", outDir);
+    }
+
+    if (current_package_name_str.empty()) {
+         LOGE("Could not determine package name for library filtering. Aborting library save.");
+    } else {
+        LOGI("Using package name for filtering: %s", current_package_name_str.c_str());
+        IterateData iter_data;
+        iter_data.output_dir_files = files_output_dir.c_str();
+        iter_data.app_package_name = current_package_name_str.c_str();
+        int iteration_result = xdl_iterate_phdr(save_library_callback, &iter_data, XDL_FULL_PATHNAME);
+        if (iteration_result != 0) {
+            LOGW("xdl_iterate_phdr finished with a non-zero status: %d", iteration_result);
+        }
+    }
+    LOGI("Finished attempting to save native libraries.");
     LOGI("dump done!");
 }
