@@ -107,7 +107,7 @@ std::string dump_method(Il2CppClass *klass) {
 
         if (method->methodPointer) {
             xdl_info_t method_dlinfo;
-            if (xdl_addr(method->methodPointer, &method_dlinfo, &g_xdl_addr_cache) != 0) {
+            if (xdl_addr(reinterpret_cast<void*>(method->methodPointer), &method_dlinfo, &g_xdl_addr_cache) != 0) {
                 const char* full_module_path = method_dlinfo.dli_fname;
                 uint64_t module_base_for_method = reinterpret_cast<uint64_t>(method_dlinfo.dli_fbase);
                 
